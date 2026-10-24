@@ -1,8 +1,12 @@
 package neqsim.process.util.optimizer;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -63,7 +67,7 @@ import neqsim.thermo.system.SystemSrkEos;
  * @author NeqSim Development Team
  * @version 1.0
  */
-class FieldToFacilityOptimizationAcceptanceTest {
+public class FieldToFacilityOptimizationAcceptanceTest {
   private static final Logger logger = LogManager.getLogger(FieldToFacilityOptimizationAcceptanceTest.class);
 
   /** Complete mutable field-to-host fixture. */
@@ -172,6 +176,41 @@ class FieldToFacilityOptimizationAcceptanceTest {
       this.search = search;
       this.slices = Arrays.copyOf(slices, slices.length);
     }
+  }
+
+  /**
+   * Execute the source-backed ten-well lifecycle acceptance case and serialize its exact schema-v8 evidence.
+   *
+   * <p>
+   * This test-scope entry point lets the Python living-task acceptance workflow call the same Java fixture and physical
+   * constraints as this regression. The current period is bound to {@code currentCycleId}; the earlier period remains
+   * an independent model with tighter separator and scrubber capacity. No evidence dictionaries are rebuilt on the
+   * Python side.
+   *
+   * @param currentCycleId living-task cycle identifier for the current lifecycle period
+   * @return exact lifecycle evidence JSON emitted by the Java production exporter
+   */
+  public static String createTenWellLifecycleEvidenceJson(String currentCycleId) {
+    FieldToFacilityOptimizationAcceptanceTest acceptance = new FieldToFacilityOptimizationAcceptanceTest();
+    Fixture earlyFixture = acceptance.createFixture(10);
+    acceptance.configureLifecycleCapacityLimits(earlyFixture, 1.03);
+    LifecyclePeriod early = acceptance.evaluateLifecyclePeriod("early-life", earlyFixture,
+        earlyFixture.model.getPower("kW") * 1.8);
+
+    Fixture currentFixture = acceptance.createFixture(10);
+    acceptance.configureLifecycleCapacityLimits(currentFixture, 10.0);
+    LifecyclePeriod current = acceptance.evaluateLifecyclePeriod(currentCycleId, currentFixture,
+        currentFixture.model.getPower("kW") * 1.02);
+
+    return new ProcessModelOperatingEnvelopeLifecycleStudy("ten-well-lifecycle", "Ten-well field lifecycle envelope",
+        "synthetic independent reservoir/facility operating definitions", "year")
+        .addPeriod("early-life", "Early life", 0.0,
+            "tight separator and scrubber operating limits; qualified compressor maps retained", early.study,
+            early.search, early.slices)
+        .addPeriod(currentCycleId, "Current life", 5.0,
+            "expanded separation capacity and tighter shared plant power budget", current.study, current.search,
+            current.slices)
+        .toEvidenceJson(currentCycleId);
   }
 
   /**
@@ -392,8 +431,24 @@ class FieldToFacilityOptimizationAcceptanceTest {
         .addPeriod("late-life", "Late life", 5.0, "expanded separation capacity and tighter shared plant power budget",
             late.study, late.search, late.slices);
     Map<String, Object> lifecycleEvidence = lifecycle.toEvidenceMap("synthetic-lifecycle-cycle");
+    JsonObject lifecycleJson = JsonParser.parseString(lifecycle.toEvidenceJson("late-life")).getAsJsonObject();
 
     assertEquals(Integer.valueOf(8), lifecycleEvidence.get("schema_version"));
+    assertEquals(8, lifecycleJson.get("schema_version").getAsInt());
+    assertEquals("late-life", lifecycleJson.get("cycle_id").getAsString());
+    JsonArray jsonPeriods = lifecycleJson.getAsJsonArray("periods");
+    assertEquals(2, jsonPeriods.size());
+    assertEquals("late-life", jsonPeriods.get(1).getAsJsonObject().get("period_id").getAsString());
+    assertEquals("late-life", jsonPeriods.get(1).getAsJsonObject().getAsJsonObject("envelope_evidence")
+        .getAsJsonObject("optimizer_evidence").get("cycle_id").getAsString());
+    JsonObject rejectingSummary = jsonPeriods.get(0).getAsJsonObject().getAsJsonObject("envelope_evidence")
+        .getAsJsonObject("cross_slice_constraint_summary").getAsJsonArray("ranked_constraints").get(0)
+        .getAsJsonObject();
+    assertTrue(rejectingSummary.has("minimum_normalized_margin"));
+    assertTrue(rejectingSummary.get("minimum_normalized_margin").isJsonNull());
+    assertTrue(rejectingSummary.has("representative_feasible_constraint"));
+    assertTrue(rejectingSummary.get("representative_feasible_constraint").isJsonNull());
+    assertThrows(IllegalStateException.class, () -> lifecycle.toEvidenceJson("missing-cycle"));
     assertEquals(Integer.valueOf(2), lifecycleEvidence.get("period_count"));
     assertEquals(Integer.valueOf(12), lifecycleEvidence.get("requested_point_count"));
     assertEquals(Integer.valueOf(12), lifecycleEvidence.get("completed_point_count"));
